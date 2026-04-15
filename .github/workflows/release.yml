@@ -11,17 +11,13 @@ permissions:
 jobs:
   release:
     name: Build and publish DMG (unsigned)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: |
-          if [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.4.app
-          fi
-          xcodebuild -version
+      - name: Show Xcode version
+        run: xcodebuild -version
 
       - name: Bootstrap CI tools (xcodegen, create-dmg)
         run: bash macos/scripts/ci-bootstrap.sh
