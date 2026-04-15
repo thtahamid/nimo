@@ -25,7 +25,19 @@ enum CalloutKind: Equatable {
     }
 }
 
+struct CalloutAction: Equatable {
+    let title: String
+    let url: URL
+}
+
 struct StatusCallout: Equatable {
     let kind: CalloutKind
     let message: String
+    let action: CalloutAction?
+
+    init(kind: CalloutKind, message: String, action: CalloutAction? = nil) {
+        self.kind = kind
+        self.message = message
+        self.action = action
+    }
 }

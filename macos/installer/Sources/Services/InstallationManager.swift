@@ -5,6 +5,7 @@ enum NimoError: LocalizedError, Equatable {
     case bundledLauncherMissing
     case discordBinaryMissing(URL)
     case permissionDenied(URL, underlying: Error)
+    case appManagementDenied(URL)
     case authorizationCancelled
     case unexpected(Error)
 
@@ -18,6 +19,8 @@ enum NimoError: LocalizedError, Equatable {
             return "Expected Discord binary was not found at \(url.path)."
         case .permissionDenied(let url, let underlying):
             return "Permission denied while modifying \(url.path). Underlying error: \(underlying.localizedDescription)"
+        case .appManagementDenied:
+            return "macOS is blocking Nimo from modifying Discord. Enable Nimo under System Settings → Privacy & Security → App Management, then retry."
         case .authorizationCancelled:
             return "Administrator authorization was cancelled — nothing was changed."
         case .unexpected(let error):
@@ -35,6 +38,8 @@ enum NimoError: LocalizedError, Equatable {
             return l == r
         case let (.permissionDenied(lu, _), .permissionDenied(ru, _)):
             return lu == ru
+        case let (.appManagementDenied(l), .appManagementDenied(r)):
+            return l == r
         case let (.unexpected(l), .unexpected(r)):
             return (l as NSError) == (r as NSError)
         default:
@@ -110,6 +115,8 @@ final class InstallationManager: InstallationPerforming {
             try executor.run(commands.joined(separator: "\n"))
         } catch is PrivilegedCancelled {
             throw NimoError.authorizationCancelled
+        } catch let failure as PrivilegedFailure where Self.looksLikeAppManagementBlock(failure.message) {
+            throw NimoError.appManagementDenied(installation.appURL)
         } catch {
             throw NimoError.permissionDenied(macOSDir, underlying: error)
         }
@@ -133,6 +140,8 @@ final class InstallationManager: InstallationPerforming {
             try executor.run(commands.joined(separator: "\n"))
         } catch is PrivilegedCancelled {
             throw NimoError.authorizationCancelled
+        } catch let failure as PrivilegedFailure where Self.looksLikeAppManagementBlock(failure.message) {
+            throw NimoError.appManagementDenied(installation.appURL)
         } catch {
             throw NimoError.permissionDenied(macOSDir, underlying: error)
         }
@@ -172,6 +181,14 @@ final class InstallationManager: InstallationPerforming {
 
     private func shQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// True when shell stderr indicates macOS App Management (Sonoma+) blocked
+    /// the modification even though we elevated via osascript.
+    static func looksLikeAppManagementBlock(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("operation not permitted") ||
+               lower.contains("not permitted")
     }
 
     private static let inlineLauncherTemplate = """

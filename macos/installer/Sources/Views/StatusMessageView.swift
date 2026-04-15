@@ -5,7 +5,7 @@ struct StatusMessageView: View {
 
     var body: some View {
         if let callout = callout {
-            CalloutView(kind: callout.kind, title: callout.message)
+            CalloutView(kind: callout.kind, title: callout.message, action: callout.action)
         }
     }
 }

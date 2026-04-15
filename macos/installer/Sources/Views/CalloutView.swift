@@ -4,11 +4,13 @@ struct CalloutView: View {
     let kind: CalloutKind
     let title: String
     let detail: String?
+    let action: CalloutAction?
 
-    init(kind: CalloutKind, title: String, detail: String? = nil) {
+    init(kind: CalloutKind, title: String, detail: String? = nil, action: CalloutAction? = nil) {
         self.kind = kind
         self.title = title
         self.detail = detail
+        self.action = action
     }
 
     var body: some View {
@@ -17,7 +19,7 @@ struct CalloutView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(kind.tint)
                 .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.callout.weight(.medium))
                     .foregroundColor(.primary)
@@ -27,6 +29,15 @@ struct CalloutView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let action = action {
+                    Button(action.title) {
+                        NSWorkspace.shared.open(action.url)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(kind.tint)
+                    .padding(.top, 4)
                 }
             }
             Spacer(minLength: 0)
@@ -51,10 +62,15 @@ struct CalloutView_Previews: PreviewProvider {
             CalloutView(kind: .info, title: "Informational note")
             CalloutView(kind: .success, title: "Installation complete.", detail: "Nimo active on Discord Stable.")
             CalloutView(kind: .warning, title: "Discord not detected", detail: "Install Discord from discord.com first.")
-            CalloutView(kind: .error, title: "Install failed", detail: "Permission denied writing to /Applications.")
+            CalloutView(
+                kind: .error,
+                title: "macOS blocked the install",
+                detail: "Enable Nimo in App Management and retry.",
+                action: CalloutAction(title: "Open System Settings", url: URL(string: "https://example.com")!)
+            )
         }
         .padding()
-        .frame(width: 420)
+        .frame(width: 520)
     }
 }
 #endif

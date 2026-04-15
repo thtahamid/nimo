@@ -17,6 +17,7 @@ protocol InstallationPerforming {
 final class InstallerViewModel: ObservableObject {
     @Published private(set) var installations: [DiscordInstallation] = []
     @Published private(set) var state: InstallationState = .idle
+    @Published private(set) var lastError: NimoError?
 
     private let detector: DiscordDetecting
     private let installer: InstallationPerforming
@@ -59,6 +60,17 @@ final class InstallerViewModel: ObservableObject {
         case .success(let message):
             return StatusCallout(kind: .success, message: message)
         case .failure(let message):
+            if case .appManagementDenied = lastError,
+               let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles") {
+                return StatusCallout(
+                    kind: .error,
+                    message: message,
+                    action: CalloutAction(title: "Open System Settings", url: url)
+                )
+            }
+            if case .authorizationCancelled = lastError {
+                return StatusCallout(kind: .info, message: message)
+            }
             return StatusCallout(kind: .error, message: message)
         }
     }
@@ -90,13 +102,17 @@ final class InstallerViewModel: ObservableObject {
                 await MainActor.run {
                     guard let self = self else { return }
                     self.refresh()
+                    self.lastError = nil
                     self.state = .success("Installation complete.")
                 }
             } catch {
+                let nimoError = error as? NimoError
+                let message = nimoError?.errorDescription ?? error.localizedDescription
                 await MainActor.run {
                     guard let self = self else { return }
                     self.refresh()
-                    self.state = .failure(error.localizedDescription)
+                    self.lastError = nimoError
+                    self.state = .failure(message)
                 }
             }
         }
@@ -115,13 +131,17 @@ final class InstallerViewModel: ObservableObject {
                 await MainActor.run {
                     guard let self = self else { return }
                     self.refresh()
+                    self.lastError = nil
                     self.state = .success("Uninstall complete.")
                 }
             } catch {
+                let nimoError = error as? NimoError
+                let message = nimoError?.errorDescription ?? error.localizedDescription
                 await MainActor.run {
                     guard let self = self else { return }
                     self.refresh()
-                    self.state = .failure(error.localizedDescription)
+                    self.lastError = nimoError
+                    self.state = .failure(message)
                 }
             }
         }
