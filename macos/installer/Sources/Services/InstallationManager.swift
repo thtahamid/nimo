@@ -5,7 +5,6 @@ enum NimoError: LocalizedError, Equatable {
     case bundledLauncherMissing
     case discordBinaryMissing(URL)
     case permissionDenied(URL, underlying: Error)
-    case appManagementDenied(URL)
     case unexpected(Error)
 
     var errorDescription: String? {
@@ -18,8 +17,6 @@ enum NimoError: LocalizedError, Equatable {
             return "Expected Discord binary was not found at \(url.path)."
         case .permissionDenied(let url, let underlying):
             return "Permission denied while modifying \(url.path). Underlying error: \(underlying.localizedDescription)"
-        case .appManagementDenied:
-            return "macOS is blocking Nimo from modifying Discord. Enable Nimo under System Settings → Privacy & Security → App Management, then quit and reopen Nimo before retrying."
         case .unexpected(let error):
             return "Unexpected error: \(error.localizedDescription)"
         }
@@ -34,8 +31,6 @@ enum NimoError: LocalizedError, Equatable {
             return l == r
         case let (.permissionDenied(lu, _), .permissionDenied(ru, _)):
             return lu == ru
-        case let (.appManagementDenied(l), .appManagementDenied(r)):
-            return l == r
         case let (.unexpected(l), .unexpected(r)):
             return (l as NSError) == (r as NSError)
         default:
@@ -44,32 +39,48 @@ enum NimoError: LocalizedError, Equatable {
     }
 }
 
+/// Installs Nimo by building a modified **copy** of Discord.app at
+/// `~/Applications/<Edition> (Nimo).app`. The original /Applications bundle is
+/// never touched, which avoids the macOS App Management TCC prompt loop entirely.
 final class InstallationManager: InstallationPerforming {
     private let fileManager: FileManager
     private let dylibURLProvider: () -> URL?
     private let launcherURLProvider: () -> URL?
-    /// Closure used to ad-hoc re-sign a modified bundle. Tests override to a no-op.
     private let codesign: (URL) -> Void
+    private let wrapperParentURL: URL
 
     init(
         fileManager: FileManager = .default,
         dylibURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "nimo", withExtension: "dylib") },
         launcherURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "launcher", withExtension: "sh") },
-        codesign: @escaping (URL) -> Void = InstallationManager.adhocCodesign
+        codesign: @escaping (URL) -> Void = InstallationManager.adhocCodesign,
+        wrapperParentURL: URL = InstallationManager.defaultWrapperParent
     ) {
         self.fileManager = fileManager
         self.dylibURLProvider = dylibURLProvider
         self.launcherURLProvider = launcherURLProvider
         self.codesign = codesign
+        self.wrapperParentURL = wrapperParentURL
+    }
+
+    static var defaultWrapperParent: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
     }
 
     // MARK: - Public API
 
+    func wrapperURL(for installation: DiscordInstallation) -> URL {
+        let name = "\(installation.edition.displayName) (Nimo).app"
+        return wrapperParentURL.appendingPathComponent(name, isDirectory: true)
+    }
+
     func isInstalled(at installation: DiscordInstallation) -> Bool {
-        let macOSDir = installation.macOSDirectoryURL
-        let real = macOSDir.appendingPathComponent("Discord.real").path
-        let dylib = macOSDir.appendingPathComponent("nimo.dylib").path
-        return fileManager.fileExists(atPath: real) && fileManager.fileExists(atPath: dylib)
+        let wrapper = wrapperURL(for: installation)
+        let macOS = wrapper.appendingPathComponent("Contents/MacOS")
+        let dylib = macOS.appendingPathComponent("nimo.dylib")
+        let real = macOS.appendingPathComponent("Discord.real")
+        return fileManager.fileExists(atPath: dylib.path) && fileManager.fileExists(atPath: real.path)
     }
 
     func install(to installation: DiscordInstallation) throws {
@@ -78,101 +89,78 @@ final class InstallationManager: InstallationPerforming {
             throw NimoError.bundledDylibMissing
         }
 
-        let macOSDir = installation.macOSDirectoryURL
-        let discordBinary = macOSDir.appendingPathComponent("Discord")
-        let discordReal = macOSDir.appendingPathComponent("Discord.real")
-        let dylibDest = macOSDir.appendingPathComponent("nimo.dylib")
-
-        // 1. Back up Discord -> Discord.real (once).
-        if !fileManager.fileExists(atPath: discordReal.path) {
-            guard fileManager.fileExists(atPath: discordBinary.path) else {
-                throw NimoError.discordBinaryMissing(discordBinary)
-            }
-            try wrapFilesystem(at: installation.appURL) {
-                try fileManager.moveItem(at: discordBinary, to: discordReal)
-            }
-        } else if fileManager.fileExists(atPath: discordBinary.path) {
-            // Earlier failed install left the old Discord binary around — remove it.
-            try? fileManager.removeItem(at: discordBinary)
+        let source = installation.appURL
+        let sourceBinary = source.appendingPathComponent("Contents/MacOS/Discord")
+        guard fileManager.fileExists(atPath: sourceBinary.path) else {
+            throw NimoError.discordBinaryMissing(sourceBinary)
         }
 
-        // 2. Copy nimo.dylib into place.
-        try wrapFilesystem(at: installation.appURL) {
+        let destination = wrapperURL(for: installation)
+
+        do {
+            // Ensure ~/Applications exists (user-owned — no TCC prompt).
+            try fileManager.createDirectory(at: wrapperParentURL, withIntermediateDirectories: true)
+
+            // Fresh install: remove any previous wrapper so auto-updated Discord is picked up.
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+
+            // Copy the whole Discord.app into our home folder. Reading /Applications
+            // is always allowed; writing under ~/Applications does not require App Management.
+            try fileManager.copyItem(at: source, to: destination)
+
+            // Now reshape the copy:
+            let macOS = destination.appendingPathComponent("Contents/MacOS")
+            let discord = macOS.appendingPathComponent("Discord")
+            let discordReal = macOS.appendingPathComponent("Discord.real")
+            let dylibDest = macOS.appendingPathComponent("nimo.dylib")
+
+            // If source already had a prior in-place install (Discord.real present),
+            // the real binary came through unchanged; just drop the leftover launcher.
+            if fileManager.fileExists(atPath: discordReal.path) {
+                if fileManager.fileExists(atPath: discord.path) {
+                    try fileManager.removeItem(at: discord)
+                }
+            } else {
+                try fileManager.moveItem(at: discord, to: discordReal)
+            }
+
+            // Copy bundled nimo.dylib next to it (replace if carried over from prior install).
             if fileManager.fileExists(atPath: dylibDest.path) {
                 try fileManager.removeItem(at: dylibDest)
             }
             try fileManager.copyItem(at: bundledDylib, to: dylibDest)
+
+            // Write the launcher script as the new main binary.
+            try writeLauncher(to: discord)
+        } catch let error as NimoError {
+            throw error
+        } catch {
+            throw NimoError.permissionDenied(destination, underlying: error)
         }
 
-        // 3. Write launcher.sh as the new Discord binary.
-        try writeLauncher(to: discordBinary, appURL: installation.appURL)
+        // Strip the original signature (with hardened runtime) and ad-hoc re-sign so
+        // DYLD_INSERT_LIBRARIES takes effect and Gatekeeper still launches the bundle.
+        codesign(destination)
 
-        // 4. Ad-hoc re-sign so Gatekeeper still accepts the bundle.
-        codesign(installation.appURL)
-
-        NimoLogger.installer.info("Installed into \(installation.appURL.path, privacy: .public)")
+        NimoLogger.installer.info("Wrapper created at \(destination.path, privacy: .public)")
     }
 
     func uninstall(from installation: DiscordInstallation) throws {
-        let macOSDir = installation.macOSDirectoryURL
-        let discordBinary = macOSDir.appendingPathComponent("Discord")
-        let discordReal = macOSDir.appendingPathComponent("Discord.real")
-        let dylibDest = macOSDir.appendingPathComponent("nimo.dylib")
-
-        if fileManager.fileExists(atPath: dylibDest.path) {
-            try wrapFilesystem(at: installation.appURL) {
-                try fileManager.removeItem(at: dylibDest)
-            }
+        let wrapper = wrapperURL(for: installation)
+        guard fileManager.fileExists(atPath: wrapper.path) else { return }
+        do {
+            try fileManager.removeItem(at: wrapper)
+        } catch {
+            throw NimoError.permissionDenied(wrapper, underlying: error)
         }
-        if fileManager.fileExists(atPath: discordBinary.path) {
-            try wrapFilesystem(at: installation.appURL) {
-                try fileManager.removeItem(at: discordBinary)
-            }
-        }
-        if fileManager.fileExists(atPath: discordReal.path) {
-            try wrapFilesystem(at: installation.appURL) {
-                try fileManager.moveItem(at: discordReal, to: discordBinary)
-            }
-        }
-
-        codesign(installation.appURL)
-
-        NimoLogger.installer.info("Uninstalled from \(installation.appURL.path, privacy: .public)")
+        NimoLogger.installer.info("Wrapper removed at \(wrapper.path, privacy: .public)")
     }
 
     // MARK: - Helpers
 
-    /// Runs a block of FileManager operations and translates permission failures
-    /// into the App Management diagnostic we want to show the user.
-    private func wrapFilesystem(at appURL: URL, _ block: () throws -> Void) throws {
-        do {
-            try block()
-        } catch let error as NSError where Self.isPermissionDenied(error) {
-            throw NimoError.appManagementDenied(appURL)
-        } catch {
-            throw NimoError.permissionDenied(appURL, underlying: error)
-        }
-    }
-
-    private static func isPermissionDenied(_ error: NSError) -> Bool {
-        if error.domain == NSPOSIXErrorDomain, error.code == 1 /* EPERM */ || error.code == 13 /* EACCES */ {
-            return true
-        }
-        if error.domain == NSCocoaErrorDomain {
-            switch error.code {
-            case NSFileWriteNoPermissionError, NSFileReadNoPermissionError:
-                return true
-            default:
-                break
-            }
-        }
-        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
-            return isPermissionDenied(underlying)
-        }
-        return false
-    }
-
-    private func writeLauncher(to destination: URL, appURL: URL) throws {
+    private func writeLauncher(to destination: URL) throws {
         let data: Data
         if let launcherURL = launcherURLProvider(),
            let contents = try? Data(contentsOf: launcherURL) {
@@ -184,23 +172,22 @@ final class InstallationManager: InstallationPerforming {
             data = inline
         }
 
-        try wrapFilesystem(at: appURL) {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try data.write(to: destination, options: .atomic)
-            try fileManager.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o755)],
-                ofItemAtPath: destination.path
-            )
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
         }
+        try data.write(to: destination, options: .atomic)
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: destination.path
+        )
     }
 
-    /// Ad-hoc code signs a bundle in place. Failures are logged but non-fatal — the
-    /// install still proceeded; Gatekeeper may prompt on first launch but the app works.
+    /// Clears quarantine and ad-hoc re-signs a bundle so DYLD_INSERT_LIBRARIES takes
+    /// effect and Gatekeeper accepts the modified copy.
     static func adhocCodesign(_ bundle: URL) {
-        // Clear quarantine first so the bundle is not treated as downloaded content.
         run(path: "/usr/bin/xattr", args: ["-cr", bundle.path])
+        // Strip the original signature to drop hardened runtime.
+        run(path: "/usr/bin/codesign", args: ["--remove-signature", bundle.path])
         run(path: "/usr/bin/codesign", args: ["--force", "--deep", "--sign", "-", bundle.path])
     }
 

@@ -60,14 +60,6 @@ final class InstallerViewModel: ObservableObject {
         case .success(let message):
             return StatusCallout(kind: .success, message: message)
         case .failure(let message):
-            if case .appManagementDenied = lastError,
-               let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles") {
-                return StatusCallout(
-                    kind: .error,
-                    message: message,
-                    action: CalloutAction(title: "Open System Settings", url: url)
-                )
-            }
             return StatusCallout(kind: .error, message: message)
         }
     }
@@ -83,7 +75,12 @@ final class InstallerViewModel: ObservableObject {
     // MARK: - Actions
 
     func refresh() {
-        installations = detector.detect()
+        let detected = detector.detect()
+        installations = detected.map { installation in
+            var copy = installation
+            copy.isInstalled = installer.isInstalled(at: installation)
+            return copy
+        }
     }
 
     func install() {
@@ -100,7 +97,7 @@ final class InstallerViewModel: ObservableObject {
                     guard let self = self else { return }
                     self.refresh()
                     self.lastError = nil
-                    self.state = .success("Installation complete.")
+                    self.state = .success("Installed. Launch the “(Nimo)” wrapper from ~/Applications to run Discord through Nimo.")
                 }
             } catch {
                 let nimoError = error as? NimoError
@@ -129,7 +126,7 @@ final class InstallerViewModel: ObservableObject {
                     guard let self = self else { return }
                     self.refresh()
                     self.lastError = nil
-                    self.state = .success("Uninstall complete.")
+                    self.state = .success("Uninstalled. The Nimo wrapper was removed from ~/Applications.")
                 }
             } catch {
                 let nimoError = error as? NimoError

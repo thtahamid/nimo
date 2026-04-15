@@ -71,20 +71,10 @@ final class DiscordDetectorTests: XCTestCase {
         XCTAssertTrue(detector.detect().isEmpty)
     }
 
-    func testDetectsInstalledState() throws {
-        let macOS = try createFakeBundle(in: tempDir, bundleName: "Discord.app", writeDiscordBinary: false)
-        // Simulate installed: Discord.real + nimo.dylib exist, launcher script as Discord.
-        let real = macOS.appendingPathComponent("Discord.real")
-        let dylib = macOS.appendingPathComponent("nimo.dylib")
-        let launcher = macOS.appendingPathComponent("Discord")
-        try Data("binary".utf8).write(to: real)
-        try Data("dylib".utf8).write(to: dylib)
-        try Data("#!/bin/sh\n".utf8).write(to: launcher)
+    func testSkipsBundlesWithoutDiscordBinary() throws {
+        try createFakeBundle(in: tempDir, bundleName: "Discord.app", writeDiscordBinary: false)
 
         let detector = DiscordDetector(fileManager: fm, searchDirectories: [tempDir])
-        let results = detector.detect()
-
-        XCTAssertEqual(results.count, 1)
-        XCTAssertTrue(results.first?.isInstalled ?? false)
+        XCTAssertTrue(detector.detect().isEmpty)
     }
 }

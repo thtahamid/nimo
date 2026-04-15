@@ -36,32 +36,23 @@ final class DiscordDetector: DiscordDetecting {
                 }
 
                 let macOSDir = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
-                // Require either Discord binary or Discord.real to exist (otherwise it's not a real bundle).
                 let discordBinary = macOSDir.appendingPathComponent("Discord").path
-                let discordReal = macOSDir.appendingPathComponent("Discord.real").path
-                guard fileManager.fileExists(atPath: discordBinary) || fileManager.fileExists(atPath: discordReal) else {
+                guard fileManager.fileExists(atPath: discordBinary) else {
                     continue
                 }
 
-                let installed = isInstalled(at: macOSDir)
                 seenPaths.insert(standardized)
                 results.append(
                     DiscordInstallation(
                         edition: edition,
                         appURL: appURL,
-                        isInstalled: installed
+                        isInstalled: false
                     )
                 )
-                NimoLogger.detector.debug("Detected \(edition.displayName, privacy: .public) at \(appURL.path, privacy: .public) installed=\(installed, privacy: .public)")
+                NimoLogger.detector.debug("Detected \(edition.displayName, privacy: .public) at \(appURL.path, privacy: .public)")
             }
         }
 
         return results
-    }
-
-    private func isInstalled(at macOSDir: URL) -> Bool {
-        let realPath = macOSDir.appendingPathComponent("Discord.real").path
-        let dylibPath = macOSDir.appendingPathComponent("nimo.dylib").path
-        return fileManager.fileExists(atPath: realPath) && fileManager.fileExists(atPath: dylibPath)
     }
 }

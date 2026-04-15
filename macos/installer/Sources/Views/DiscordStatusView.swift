@@ -22,15 +22,19 @@ struct DiscordStatusView: View {
 
     @ViewBuilder
     private func row(for installation: DiscordInstallation) -> some View {
-        let kind: CalloutKind = installation.isInstalled ? .success : .info
-        let title = installation.isInstalled
-            ? "Nimo active on \(installation.edition.displayName)"
-            : installation.edition.displayName
-        CalloutView(
-            kind: kind,
-            title: title,
-            detail: installation.appURL.path
-        )
+        if installation.isInstalled {
+            CalloutView(
+                kind: .success,
+                title: "Nimo wrapper ready for \(installation.edition.displayName)",
+                detail: "Launch “\(installation.edition.displayName) (Nimo)” from ~/Applications to run Discord through Nimo."
+            )
+        } else {
+            CalloutView(
+                kind: .info,
+                title: installation.edition.displayName,
+                detail: installation.appURL.path
+            )
+        }
     }
 }
 
@@ -53,7 +57,7 @@ struct DiscordStatusView_Previews: PreviewProvider {
             ])
         }
         .padding()
-        .frame(width: 420)
+        .frame(width: 520)
     }
 }
 #endif

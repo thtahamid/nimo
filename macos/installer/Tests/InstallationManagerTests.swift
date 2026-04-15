@@ -24,14 +24,17 @@ final class InstallationManagerTests: XCTestCase {
 
     private struct Fixture {
         let installation: DiscordInstallation
-        let macOSDir: URL
+        let sourceMacOSDir: URL
+        let wrapperParent: URL
         let originalBinaryContents: Data
         let dylibURL: URL
         let launcherURL: URL
     }
 
     private func makeFixture(originalContents: String = "original-discord-binary") throws -> Fixture {
-        let appURL = tempDir.appendingPathComponent("Discord.app", isDirectory: true)
+        let sourceApps = tempDir.appendingPathComponent("source-apps", isDirectory: true)
+        try fm.createDirectory(at: sourceApps, withIntermediateDirectories: true)
+        let appURL = sourceApps.appendingPathComponent("Discord.app", isDirectory: true)
         let macOS = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         try fm.createDirectory(at: macOS, withIntermediateDirectories: true)
 
@@ -51,6 +54,8 @@ final class InstallationManagerTests: XCTestCase {
         """
         try Data(launcherText.utf8).write(to: launcher)
 
+        let wrapperParent = tempDir.appendingPathComponent("user-apps", isDirectory: true)
+
         let installation = DiscordInstallation(
             edition: .stable,
             appURL: appURL,
@@ -58,7 +63,8 @@ final class InstallationManagerTests: XCTestCase {
         )
         return Fixture(
             installation: installation,
-            macOSDir: macOS,
+            sourceMacOSDir: macOS,
+            wrapperParent: wrapperParent,
             originalBinaryContents: originalData,
             dylibURL: dylib,
             launcherURL: launcher
@@ -67,81 +73,104 @@ final class InstallationManagerTests: XCTestCase {
 
     private func makeManager(
         dylib: URL?,
-        launcher: URL?
+        launcher: URL?,
+        wrapperParent: URL
     ) -> InstallationManager {
         InstallationManager(
             fileManager: fm,
             dylibURLProvider: { dylib },
             launcherURLProvider: { launcher },
-            codesign: { _ in }
+            codesign: { _ in },
+            wrapperParentURL: wrapperParent
         )
     }
 
     // MARK: - Tests
 
-    func testInstallMovesBinaryAndCopiesDylib() throws {
+    func testInstallCreatesWrapperWithLauncherAndDylib() throws {
         let fx = try makeFixture()
-        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL)
+        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
 
         try manager.install(to: fx.installation)
 
-        let real = fx.macOSDir.appendingPathComponent("Discord.real")
-        let dylibDest = fx.macOSDir.appendingPathComponent("nimo.dylib")
-        let launcherDest = fx.macOSDir.appendingPathComponent("Discord")
+        let wrapper = fx.wrapperParent.appendingPathComponent("Discord (Nimo).app")
+        let macOS = wrapper.appendingPathComponent("Contents/MacOS")
+        let real = macOS.appendingPathComponent("Discord.real")
+        let dylibDest = macOS.appendingPathComponent("nimo.dylib")
+        let launcherDest = macOS.appendingPathComponent("Discord")
 
+        XCTAssertTrue(fm.fileExists(atPath: wrapper.path))
         XCTAssertTrue(fm.fileExists(atPath: real.path))
         XCTAssertTrue(fm.fileExists(atPath: dylibDest.path))
         XCTAssertTrue(fm.fileExists(atPath: launcherDest.path))
 
-        // Original binary contents should now be in Discord.real.
+        // Discord.real contains the original binary bytes.
         let realContents = try Data(contentsOf: real)
         XCTAssertEqual(realContents, fx.originalBinaryContents)
 
-        // Launcher should have 0o755 permissions.
+        // Launcher is executable (0o755).
         let attrs = try fm.attributesOfItem(atPath: launcherDest.path)
         let perms = attrs[.posixPermissions] as? NSNumber
         XCTAssertEqual(perms?.uint16Value, 0o755)
     }
 
-    func testInstallIsIdempotentForBackup() throws {
+    func testInstallLeavesOriginalBundleUntouched() throws {
         let fx = try makeFixture()
-        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL)
+        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
 
         try manager.install(to: fx.installation)
 
-        let real = fx.macOSDir.appendingPathComponent("Discord.real")
-        let firstRealContents = try Data(contentsOf: real)
-
-        // Running install again must not overwrite Discord.real with the launcher script.
-        try manager.install(to: fx.installation)
-
-        let secondRealContents = try Data(contentsOf: real)
-        XCTAssertEqual(firstRealContents, secondRealContents)
-        XCTAssertEqual(secondRealContents, fx.originalBinaryContents)
+        // Source /Applications-style bundle is unchanged.
+        let sourceDiscord = fx.sourceMacOSDir.appendingPathComponent("Discord")
+        XCTAssertTrue(fm.fileExists(atPath: sourceDiscord.path))
+        XCTAssertFalse(fm.fileExists(atPath: fx.sourceMacOSDir.appendingPathComponent("Discord.real").path))
+        XCTAssertFalse(fm.fileExists(atPath: fx.sourceMacOSDir.appendingPathComponent("nimo.dylib").path))
+        XCTAssertEqual(try Data(contentsOf: sourceDiscord), fx.originalBinaryContents)
     }
 
-    func testUninstallRestoresOriginal() throws {
+    func testInstallIsIdempotent() throws {
         let fx = try makeFixture()
-        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL)
+        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
+
+        try manager.install(to: fx.installation)
+        try manager.install(to: fx.installation)
+
+        let wrapper = fx.wrapperParent.appendingPathComponent("Discord (Nimo).app")
+        let real = wrapper.appendingPathComponent("Contents/MacOS/Discord.real")
+        let realContents = try Data(contentsOf: real)
+        XCTAssertEqual(realContents, fx.originalBinaryContents)
+    }
+
+    func testUninstallRemovesWrapperOnly() throws {
+        let fx = try makeFixture()
+        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
 
         try manager.install(to: fx.installation)
         try manager.uninstall(from: fx.installation)
 
-        let binary = fx.macOSDir.appendingPathComponent("Discord")
-        let real = fx.macOSDir.appendingPathComponent("Discord.real")
-        let dylibDest = fx.macOSDir.appendingPathComponent("nimo.dylib")
+        let wrapper = fx.wrapperParent.appendingPathComponent("Discord (Nimo).app")
+        XCTAssertFalse(fm.fileExists(atPath: wrapper.path))
 
-        XCTAssertTrue(fm.fileExists(atPath: binary.path))
-        XCTAssertFalse(fm.fileExists(atPath: real.path))
-        XCTAssertFalse(fm.fileExists(atPath: dylibDest.path))
+        // Original bundle still intact.
+        XCTAssertTrue(fm.fileExists(atPath: fx.sourceMacOSDir.appendingPathComponent("Discord").path))
+    }
 
-        let restored = try Data(contentsOf: binary)
-        XCTAssertEqual(restored, fx.originalBinaryContents)
+    func testIsInstalledReflectsWrapperState() throws {
+        let fx = try makeFixture()
+        let manager = makeManager(dylib: fx.dylibURL, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
+
+        XCTAssertFalse(manager.isInstalled(at: fx.installation))
+
+        try manager.install(to: fx.installation)
+        XCTAssertTrue(manager.isInstalled(at: fx.installation))
+
+        try manager.uninstall(from: fx.installation)
+        XCTAssertFalse(manager.isInstalled(at: fx.installation))
     }
 
     func testInstallFailsWhenDylibMissing() throws {
         let fx = try makeFixture()
-        let manager = makeManager(dylib: nil, launcher: fx.launcherURL)
+        let manager = makeManager(dylib: nil, launcher: fx.launcherURL, wrapperParent: fx.wrapperParent)
 
         XCTAssertThrowsError(try manager.install(to: fx.installation)) { error in
             guard case NimoError.bundledDylibMissing = error else {
