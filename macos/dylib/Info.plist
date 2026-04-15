@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.nimo.dylib</string>
+    <key>CFBundleName</key>
+    <string>nimo</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleExecutable</key>
+    <string>nimo.dylib</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (c) 2026 Nimo</string>
+</dict>
+</plist>

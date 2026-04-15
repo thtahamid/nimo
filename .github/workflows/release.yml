@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish DMG (unsigned)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          fi
+          xcodebuild -version
+
+      - name: Bootstrap CI tools (xcodegen, create-dmg)
+        run: bash macos/scripts/ci-bootstrap.sh
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "==> version=$VERSION"
+
+      - name: Bump version in plists and project.yml
+        run: bash macos/scripts/bump-version.sh "${{ steps.version.outputs.version }}"
+
+      - name: Build dylib
+        run: make -C macos/dylib
+
+      - name: Test dylib
+        run: make -C macos/dylib test
+
+      - name: Generate Xcode project
+        run: cd macos/installer && xcodegen generate
+
+      - name: Run Swift tests
+        run: |
+          xcodebuild test \
+            -project macos/installer/NimoInstaller.xcodeproj \
+            -scheme Nimo \
+            -destination "platform=macOS" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build Release
+        run: bash macos/scripts/build.sh --configuration Release
+
+      - name: Create DMG
+        run: bash macos/scripts/create-dmg.sh "${{ steps.version.outputs.version }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          name: Nimo ${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            build/dmg/Nimo-${{ steps.version.outputs.version }}.dmg
+            build/dmg/Nimo-${{ steps.version.outputs.version }}.sha256
+          body: |
+            ## Nimo ${{ steps.version.outputs.version }}
+
+            Unsigned macOS build of the Nimo installer.
+
+            ### Install
+            1. Download `Nimo-${{ steps.version.outputs.version }}.dmg` below.
+            2. Open the DMG and drag **Nimo.app** into `Applications`.
+            3. **First launch (Gatekeeper):** because this build is unsigned, macOS will refuse to open it on a double-click. Instead:
+               - Right-click (or Control-click) `Nimo.app` in Finder and choose **Open**.
+               - In the dialog that appears, click **Open** again.
+               - macOS will remember the decision; subsequent launches work normally.
+               - Alternatively, from Terminal: `xattr -dr com.apple.quarantine /Applications/Nimo.app`.
+            4. Verify the download with SHA-256 from `Nimo-${{ steps.version.outputs.version }}.sha256`:
+               ```
+               shasum -a 256 -c Nimo-${{ steps.version.outputs.version }}.sha256
+               ```
+
+            ### Notes
+            - This release is **not notarized** and **not code-signed**. Gatekeeper warnings are expected.
+            - Universal binary: Apple Silicon (arm64) and Intel (x86_64).
+            - Minimum macOS: 12.0.

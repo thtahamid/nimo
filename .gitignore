@@ -1,0 +1,55 @@
+# macOS build artifacts
+build/
+macos/**/build/
+macos/installer/*.xcodeproj/
+macos/installer/*.xcworkspace/
+DerivedData/
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+
+# Swift / Xcode
+*.dSYM.zip
+*.dSYM
+Pods/
+Carthage/
+
+# Delphi / Windows (discord-drover reference project)
+*.dcu
+*.exe
+*.dll
+*.bpl
+*.bpi
+*.dcp
+*.so
+*.apk
+*.drc
+*.map
+*.dres
+*.rsm
+*.tds
+*.dcu
+*.lib
+*.a
+*.o
+*.ocx
+__history/
+__recovery/
+*.~*
+*.local
+*.identcache
+*.projdata
+*.tvsconfig
+*.dsk
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
