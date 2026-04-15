@@ -6,7 +6,6 @@ enum NimoError: LocalizedError, Equatable {
     case discordBinaryMissing(URL)
     case permissionDenied(URL, underlying: Error)
     case appManagementDenied(URL)
-    case authorizationCancelled
     case unexpected(Error)
 
     var errorDescription: String? {
@@ -20,9 +19,7 @@ enum NimoError: LocalizedError, Equatable {
         case .permissionDenied(let url, let underlying):
             return "Permission denied while modifying \(url.path). Underlying error: \(underlying.localizedDescription)"
         case .appManagementDenied:
-            return "macOS is blocking Nimo from modifying Discord. Enable Nimo under System Settings → Privacy & Security → App Management, then retry."
-        case .authorizationCancelled:
-            return "Administrator authorization was cancelled — nothing was changed."
+            return "macOS is blocking Nimo from modifying Discord. Enable Nimo under System Settings → Privacy & Security → App Management, then quit and reopen Nimo before retrying."
         case .unexpected(let error):
             return "Unexpected error: \(error.localizedDescription)"
         }
@@ -31,8 +28,7 @@ enum NimoError: LocalizedError, Equatable {
     static func == (lhs: NimoError, rhs: NimoError) -> Bool {
         switch (lhs, rhs) {
         case (.bundledDylibMissing, .bundledDylibMissing),
-             (.bundledLauncherMissing, .bundledLauncherMissing),
-             (.authorizationCancelled, .authorizationCancelled):
+             (.bundledLauncherMissing, .bundledLauncherMissing):
             return true
         case let (.discordBinaryMissing(l), .discordBinaryMissing(r)):
             return l == r
@@ -52,18 +48,19 @@ final class InstallationManager: InstallationPerforming {
     private let fileManager: FileManager
     private let dylibURLProvider: () -> URL?
     private let launcherURLProvider: () -> URL?
-    private let executor: PrivilegedExecuting
+    /// Closure used to ad-hoc re-sign a modified bundle. Tests override to a no-op.
+    private let codesign: (URL) -> Void
 
     init(
         fileManager: FileManager = .default,
         dylibURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "nimo", withExtension: "dylib") },
         launcherURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "launcher", withExtension: "sh") },
-        executor: PrivilegedExecuting = AppleScriptPrivilegedExecutor()
+        codesign: @escaping (URL) -> Void = InstallationManager.adhocCodesign
     ) {
         self.fileManager = fileManager
         self.dylibURLProvider = dylibURLProvider
         self.launcherURLProvider = launcherURLProvider
-        self.executor = executor
+        self.codesign = codesign
     }
 
     // MARK: - Public API
@@ -84,111 +81,144 @@ final class InstallationManager: InstallationPerforming {
         let macOSDir = installation.macOSDirectoryURL
         let discordBinary = macOSDir.appendingPathComponent("Discord")
         let discordReal = macOSDir.appendingPathComponent("Discord.real")
+        let dylibDest = macOSDir.appendingPathComponent("nimo.dylib")
 
-        // Require a real Discord binary (or a pre-existing Discord.real from a prior install).
-        if !fileManager.fileExists(atPath: discordReal.path),
-           !fileManager.fileExists(atPath: discordBinary.path) {
-            throw NimoError.discordBinaryMissing(discordBinary)
+        // 1. Back up Discord -> Discord.real (once).
+        if !fileManager.fileExists(atPath: discordReal.path) {
+            guard fileManager.fileExists(atPath: discordBinary.path) else {
+                throw NimoError.discordBinaryMissing(discordBinary)
+            }
+            try wrapFilesystem(at: installation.appURL) {
+                try fileManager.moveItem(at: discordBinary, to: discordReal)
+            }
+        } else if fileManager.fileExists(atPath: discordBinary.path) {
+            // Earlier failed install left the old Discord binary around — remove it.
+            try? fileManager.removeItem(at: discordBinary)
         }
 
-        // Launcher: prefer the bundled file, otherwise write an inline template to a temp file.
-        let launcherSource = try resolvedLauncherURL()
-        defer { launcherSource.cleanup() }
-
-        let commands: [String] = [
-            "set -e",
-            "DIR=\(shQuote(macOSDir.path))",
-            "APP=\(shQuote(installation.appURL.path))",
-            "if [ ! -e \"$DIR/Discord.real\" ]; then mv \"$DIR/Discord\" \"$DIR/Discord.real\"; fi",
-            "rm -f \"$DIR/Discord\" \"$DIR/nimo.dylib\"",
-            "cp \(shQuote(bundledDylib.path)) \"$DIR/nimo.dylib\"",
-            "cp \(shQuote(launcherSource.url.path)) \"$DIR/Discord\"",
-            "chmod 755 \"$DIR/Discord\" \"$DIR/Discord.real\"",
-            "chmod 644 \"$DIR/nimo.dylib\"",
-            // Clear quarantine on the whole bundle so Gatekeeper doesn't re-prompt.
-            "xattr -cr \"$APP\" 2>/dev/null || true",
-            // Ad-hoc re-sign so Gatekeeper accepts the modified bundle.
-            "codesign --force --deep --sign - \"$APP\" 2>/dev/null || true"
-        ]
-
-        do {
-            try executor.run(commands.joined(separator: "\n"))
-        } catch is PrivilegedCancelled {
-            throw NimoError.authorizationCancelled
-        } catch let failure as PrivilegedFailure where Self.looksLikeAppManagementBlock(failure.message) {
-            throw NimoError.appManagementDenied(installation.appURL)
-        } catch {
-            throw NimoError.permissionDenied(macOSDir, underlying: error)
+        // 2. Copy nimo.dylib into place.
+        try wrapFilesystem(at: installation.appURL) {
+            if fileManager.fileExists(atPath: dylibDest.path) {
+                try fileManager.removeItem(at: dylibDest)
+            }
+            try fileManager.copyItem(at: bundledDylib, to: dylibDest)
         }
+
+        // 3. Write launcher.sh as the new Discord binary.
+        try writeLauncher(to: discordBinary, appURL: installation.appURL)
+
+        // 4. Ad-hoc re-sign so Gatekeeper still accepts the bundle.
+        codesign(installation.appURL)
 
         NimoLogger.installer.info("Installed into \(installation.appURL.path, privacy: .public)")
     }
 
     func uninstall(from installation: DiscordInstallation) throws {
         let macOSDir = installation.macOSDirectoryURL
+        let discordBinary = macOSDir.appendingPathComponent("Discord")
+        let discordReal = macOSDir.appendingPathComponent("Discord.real")
+        let dylibDest = macOSDir.appendingPathComponent("nimo.dylib")
 
-        let commands: [String] = [
-            "set -e",
-            "DIR=\(shQuote(macOSDir.path))",
-            "APP=\(shQuote(installation.appURL.path))",
-            "rm -f \"$DIR/nimo.dylib\" \"$DIR/Discord\"",
-            "if [ -e \"$DIR/Discord.real\" ]; then mv \"$DIR/Discord.real\" \"$DIR/Discord\"; fi",
-            "codesign --force --deep --sign - \"$APP\" 2>/dev/null || true"
-        ]
-
-        do {
-            try executor.run(commands.joined(separator: "\n"))
-        } catch is PrivilegedCancelled {
-            throw NimoError.authorizationCancelled
-        } catch let failure as PrivilegedFailure where Self.looksLikeAppManagementBlock(failure.message) {
-            throw NimoError.appManagementDenied(installation.appURL)
-        } catch {
-            throw NimoError.permissionDenied(macOSDir, underlying: error)
+        if fileManager.fileExists(atPath: dylibDest.path) {
+            try wrapFilesystem(at: installation.appURL) {
+                try fileManager.removeItem(at: dylibDest)
+            }
         }
+        if fileManager.fileExists(atPath: discordBinary.path) {
+            try wrapFilesystem(at: installation.appURL) {
+                try fileManager.removeItem(at: discordBinary)
+            }
+        }
+        if fileManager.fileExists(atPath: discordReal.path) {
+            try wrapFilesystem(at: installation.appURL) {
+                try fileManager.moveItem(at: discordReal, to: discordBinary)
+            }
+        }
+
+        codesign(installation.appURL)
 
         NimoLogger.installer.info("Uninstalled from \(installation.appURL.path, privacy: .public)")
     }
 
     // MARK: - Helpers
 
-    private struct LauncherSource {
-        let url: URL
-        let isTemporary: Bool
-        func cleanup() {
-            if isTemporary {
-                try? FileManager.default.removeItem(at: url)
+    /// Runs a block of FileManager operations and translates permission failures
+    /// into the App Management diagnostic we want to show the user.
+    private func wrapFilesystem(at appURL: URL, _ block: () throws -> Void) throws {
+        do {
+            try block()
+        } catch let error as NSError where Self.isPermissionDenied(error) {
+            throw NimoError.appManagementDenied(appURL)
+        } catch {
+            throw NimoError.permissionDenied(appURL, underlying: error)
+        }
+    }
+
+    private static func isPermissionDenied(_ error: NSError) -> Bool {
+        if error.domain == NSPOSIXErrorDomain, error.code == 1 /* EPERM */ || error.code == 13 /* EACCES */ {
+            return true
+        }
+        if error.domain == NSCocoaErrorDomain {
+            switch error.code {
+            case NSFileWriteNoPermissionError, NSFileReadNoPermissionError:
+                return true
+            default:
+                break
             }
         }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isPermissionDenied(underlying)
+        }
+        return false
     }
 
-    private func resolvedLauncherURL() throws -> LauncherSource {
-        if let bundled = launcherURLProvider(), fileManager.fileExists(atPath: bundled.path) {
-            return LauncherSource(url: bundled, isTemporary: false)
+    private func writeLauncher(to destination: URL, appURL: URL) throws {
+        let data: Data
+        if let launcherURL = launcherURLProvider(),
+           let contents = try? Data(contentsOf: launcherURL) {
+            data = contents
+        } else {
+            guard let inline = Self.inlineLauncherTemplate.data(using: .utf8) else {
+                throw NimoError.bundledLauncherMissing
+            }
+            data = inline
         }
-        let tmp = fileManager.temporaryDirectory
-            .appendingPathComponent("nimo-launcher-\(UUID().uuidString).sh")
-        guard let data = Self.inlineLauncherTemplate.data(using: .utf8) else {
-            throw NimoError.bundledLauncherMissing
+
+        try wrapFilesystem(at: appURL) {
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            try data.write(to: destination, options: .atomic)
+            try fileManager.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o755)],
+                ofItemAtPath: destination.path
+            )
         }
+    }
+
+    /// Ad-hoc code signs a bundle in place. Failures are logged but non-fatal — the
+    /// install still proceeded; Gatekeeper may prompt on first launch but the app works.
+    static func adhocCodesign(_ bundle: URL) {
+        // Clear quarantine first so the bundle is not treated as downloaded content.
+        run(path: "/usr/bin/xattr", args: ["-cr", bundle.path])
+        run(path: "/usr/bin/codesign", args: ["--force", "--deep", "--sign", "-", bundle.path])
+    }
+
+    @discardableResult
+    private static func run(path: String, args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = args
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
         do {
-            try data.write(to: tmp, options: .atomic)
-            try fileManager.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: tmp.path)
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus
         } catch {
-            throw NimoError.bundledLauncherMissing
+            NimoLogger.installer.error("\(path) failed to launch: \(error.localizedDescription, privacy: .public)")
+            return -1
         }
-        return LauncherSource(url: tmp, isTemporary: true)
-    }
-
-    private func shQuote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    /// True when shell stderr indicates macOS App Management (Sonoma+) blocked
-    /// the modification even though we elevated via osascript.
-    static func looksLikeAppManagementBlock(_ message: String) -> Bool {
-        let lower = message.lowercased()
-        return lower.contains("operation not permitted") ||
-               lower.contains("not permitted")
     }
 
     private static let inlineLauncherTemplate = """

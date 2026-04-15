@@ -73,7 +73,7 @@ final class InstallationManagerTests: XCTestCase {
             fileManager: fm,
             dylibURLProvider: { dylib },
             launcherURLProvider: { launcher },
-            executor: LocalShellExecutor()
+            codesign: { _ in }
         )
     }
 

@@ -68,9 +68,6 @@ final class InstallerViewModel: ObservableObject {
                     action: CalloutAction(title: "Open System Settings", url: url)
                 )
             }
-            if case .authorizationCancelled = lastError {
-                return StatusCallout(kind: .info, message: message)
-            }
             return StatusCallout(kind: .error, message: message)
         }
     }
