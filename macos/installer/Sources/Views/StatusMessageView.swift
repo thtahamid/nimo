@@ -1,16 +1,11 @@
 import SwiftUI
 
 struct StatusMessageView: View {
-    let message: String?
-    let isError: Bool
+    let callout: StatusCallout?
 
     var body: some View {
-        if let message = message, !message.isEmpty {
-            Text(message)
-                .font(.callout)
-                .foregroundColor(isError ? .red : .secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        if let callout = callout {
+            CalloutView(kind: callout.kind, title: callout.message)
         }
     }
 }
@@ -18,12 +13,13 @@ struct StatusMessageView: View {
 #if DEBUG
 struct StatusMessageView_Previews: PreviewProvider {
     static var previews: some View {
-        VStack {
-            StatusMessageView(message: "Install succeeded.", isError: false)
-            StatusMessageView(message: "Something went wrong.", isError: true)
-            StatusMessageView(message: nil, isError: false)
+        VStack(spacing: 8) {
+            StatusMessageView(callout: StatusCallout(kind: .success, message: "Installation complete."))
+            StatusMessageView(callout: StatusCallout(kind: .error, message: "Permission denied."))
+            StatusMessageView(callout: nil)
         }
         .padding()
+        .frame(width: 420)
     }
 }
 #endif

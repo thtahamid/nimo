@@ -15,10 +15,7 @@ struct ContentView: View {
                 onInstall: { viewModel.install() },
                 onUninstall: { viewModel.uninstall() }
             )
-            StatusMessageView(
-                message: viewModel.statusMessage,
-                isError: viewModel.isErrorMessage
-            )
+            StatusMessageView(callout: viewModel.statusCallout)
             Spacer(minLength: 0)
         }
         .padding(24)

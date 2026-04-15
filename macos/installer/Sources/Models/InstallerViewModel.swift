@@ -52,6 +52,17 @@ final class InstallerViewModel: ObservableObject {
         return false
     }
 
+    var statusCallout: StatusCallout? {
+        switch state {
+        case .idle, .working:
+            return nil
+        case .success(let message):
+            return StatusCallout(kind: .success, message: message)
+        case .failure(let message):
+            return StatusCallout(kind: .error, message: message)
+        }
+    }
+
     var isAnyInstalled: Bool {
         installations.contains { $0.isInstalled }
     }

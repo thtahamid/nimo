@@ -4,11 +4,13 @@ struct DiscordStatusView: View {
     let installations: [DiscordInstallation]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             if installations.isEmpty {
-                Text("Discord not detected")
-                    .foregroundColor(.red)
-                    .font(.body)
+                CalloutView(
+                    kind: .warning,
+                    title: "Discord not detected",
+                    detail: "Install Discord from discord.com, then relaunch Nimo."
+                )
             } else {
                 ForEach(installations) { installation in
                     row(for: installation)
@@ -20,34 +22,38 @@ struct DiscordStatusView: View {
 
     @ViewBuilder
     private func row(for installation: DiscordInstallation) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(installation.edition.displayName)
-                .font(.body)
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(.green)
-            Text(installation.appURL.path)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
+        let kind: CalloutKind = installation.isInstalled ? .success : .info
+        let title = installation.isInstalled
+            ? "Nimo active on \(installation.edition.displayName)"
+            : installation.edition.displayName
+        CalloutView(
+            kind: kind,
+            title: title,
+            detail: installation.appURL.path
+        )
     }
 }
 
 #if DEBUG
 struct DiscordStatusView_Previews: PreviewProvider {
     static var previews: some View {
-        Group {
+        VStack(spacing: 8) {
             DiscordStatusView(installations: [])
             DiscordStatusView(installations: [
                 DiscordInstallation(
                     edition: .stable,
                     appURL: URL(fileURLWithPath: "/Applications/Discord.app"),
                     isInstalled: false
+                ),
+                DiscordInstallation(
+                    edition: .canary,
+                    appURL: URL(fileURLWithPath: "/Applications/Discord Canary.app"),
+                    isInstalled: true
                 )
             ])
         }
         .padding()
+        .frame(width: 420)
     }
 }
 #endif
