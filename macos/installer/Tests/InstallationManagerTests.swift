@@ -72,7 +72,8 @@ final class InstallationManagerTests: XCTestCase {
         InstallationManager(
             fileManager: fm,
             dylibURLProvider: { dylib },
-            launcherURLProvider: { launcher }
+            launcherURLProvider: { launcher },
+            executor: LocalShellExecutor()
         )
     }
 

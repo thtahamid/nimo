@@ -6,8 +6,17 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HeaderView()
-            DiscordStatusView(installations: viewModel.installations)
-            ModeSelectionView()
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionLabel("Detected installations")
+                DiscordStatusView(installations: viewModel.installations)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionLabel("Mode")
+                ModeSelectionView()
+            }
+
             ActionButtonsView(
                 isInstalled: viewModel.isAnyInstalled,
                 canInstall: viewModel.canInstall,
@@ -15,7 +24,9 @@ struct ContentView: View {
                 onInstall: { viewModel.install() },
                 onUninstall: { viewModel.uninstall() }
             )
+
             StatusMessageView(callout: viewModel.statusCallout)
+
             Spacer(minLength: 0)
         }
         .padding(24)
@@ -24,12 +35,20 @@ struct ContentView: View {
             viewModel.refresh()
         }
     }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.secondary)
+            .textCase(.uppercase)
+    }
 }
 
 #if DEBUG
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
+            .frame(width: 580, height: 520)
     }
 }
 #endif

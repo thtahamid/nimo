@@ -5,6 +5,7 @@ enum NimoError: LocalizedError, Equatable {
     case bundledLauncherMissing
     case discordBinaryMissing(URL)
     case permissionDenied(URL, underlying: Error)
+    case authorizationCancelled
     case unexpected(Error)
 
     var errorDescription: String? {
@@ -17,6 +18,8 @@ enum NimoError: LocalizedError, Equatable {
             return "Expected Discord binary was not found at \(url.path)."
         case .permissionDenied(let url, let underlying):
             return "Permission denied while modifying \(url.path). Underlying error: \(underlying.localizedDescription)"
+        case .authorizationCancelled:
+            return "Administrator authorization was cancelled — nothing was changed."
         case .unexpected(let error):
             return "Unexpected error: \(error.localizedDescription)"
         }
@@ -25,7 +28,8 @@ enum NimoError: LocalizedError, Equatable {
     static func == (lhs: NimoError, rhs: NimoError) -> Bool {
         switch (lhs, rhs) {
         case (.bundledDylibMissing, .bundledDylibMissing),
-             (.bundledLauncherMissing, .bundledLauncherMissing):
+             (.bundledLauncherMissing, .bundledLauncherMissing),
+             (.authorizationCancelled, .authorizationCancelled):
             return true
         case let (.discordBinaryMissing(l), .discordBinaryMissing(r)):
             return l == r
@@ -43,15 +47,18 @@ final class InstallationManager: InstallationPerforming {
     private let fileManager: FileManager
     private let dylibURLProvider: () -> URL?
     private let launcherURLProvider: () -> URL?
+    private let executor: PrivilegedExecuting
 
     init(
         fileManager: FileManager = .default,
         dylibURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "nimo", withExtension: "dylib") },
-        launcherURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "launcher", withExtension: "sh") }
+        launcherURLProvider: @escaping () -> URL? = { Bundle.main.url(forResource: "launcher", withExtension: "sh") },
+        executor: PrivilegedExecuting = AppleScriptPrivilegedExecutor()
     ) {
         self.fileManager = fileManager
         self.dylibURLProvider = dylibURLProvider
         self.launcherURLProvider = launcherURLProvider
+        self.executor = executor
     }
 
     // MARK: - Public API
@@ -72,74 +79,62 @@ final class InstallationManager: InstallationPerforming {
         let macOSDir = installation.macOSDirectoryURL
         let discordBinary = macOSDir.appendingPathComponent("Discord")
         let discordReal = macOSDir.appendingPathComponent("Discord.real")
-        let dylibDestination = macOSDir.appendingPathComponent("nimo.dylib")
 
-        // Step 1: rename Discord -> Discord.real (only if Discord.real does not exist yet).
-        if !fileManager.fileExists(atPath: discordReal.path) {
-            guard fileManager.fileExists(atPath: discordBinary.path) else {
-                throw NimoError.discordBinaryMissing(discordBinary)
-            }
-            do {
-                try fileManager.moveItem(at: discordBinary, to: discordReal)
-            } catch {
-                throw NimoError.permissionDenied(discordBinary, underlying: error)
-            }
-        } else {
-            NimoLogger.installer.info("Discord.real already exists, skipping backup step")
-            // If the old Discord binary still exists alongside Discord.real (from a prior failed install),
-            // remove it so we can rewrite the launcher below.
-            if fileManager.fileExists(atPath: discordBinary.path) {
-                try? fileManager.removeItem(at: discordBinary)
-            }
+        // Require a real Discord binary (or a pre-existing Discord.real from a prior install).
+        if !fileManager.fileExists(atPath: discordReal.path),
+           !fileManager.fileExists(atPath: discordBinary.path) {
+            throw NimoError.discordBinaryMissing(discordBinary)
         }
 
-        // Step 2: copy nimo.dylib into place (replace if already present).
+        // Launcher: prefer the bundled file, otherwise write an inline template to a temp file.
+        let launcherSource = try resolvedLauncherURL()
+        defer { launcherSource.cleanup() }
+
+        let commands: [String] = [
+            "set -e",
+            "DIR=\(shQuote(macOSDir.path))",
+            "APP=\(shQuote(installation.appURL.path))",
+            "if [ ! -e \"$DIR/Discord.real\" ]; then mv \"$DIR/Discord\" \"$DIR/Discord.real\"; fi",
+            "rm -f \"$DIR/Discord\" \"$DIR/nimo.dylib\"",
+            "cp \(shQuote(bundledDylib.path)) \"$DIR/nimo.dylib\"",
+            "cp \(shQuote(launcherSource.url.path)) \"$DIR/Discord\"",
+            "chmod 755 \"$DIR/Discord\" \"$DIR/Discord.real\"",
+            "chmod 644 \"$DIR/nimo.dylib\"",
+            // Clear quarantine on the whole bundle so Gatekeeper doesn't re-prompt.
+            "xattr -cr \"$APP\" 2>/dev/null || true",
+            // Ad-hoc re-sign so Gatekeeper accepts the modified bundle.
+            "codesign --force --deep --sign - \"$APP\" 2>/dev/null || true"
+        ]
+
         do {
-            if fileManager.fileExists(atPath: dylibDestination.path) {
-                try fileManager.removeItem(at: dylibDestination)
-            }
-            try fileManager.copyItem(at: bundledDylib, to: dylibDestination)
+            try executor.run(commands.joined(separator: "\n"))
+        } catch is PrivilegedCancelled {
+            throw NimoError.authorizationCancelled
         } catch {
-            throw NimoError.permissionDenied(dylibDestination, underlying: error)
+            throw NimoError.permissionDenied(macOSDir, underlying: error)
         }
-
-        // Step 3: write launcher.sh as Discord, chmod 755.
-        try writeLauncher(to: discordBinary)
 
         NimoLogger.installer.info("Installed into \(installation.appURL.path, privacy: .public)")
     }
 
     func uninstall(from installation: DiscordInstallation) throws {
         let macOSDir = installation.macOSDirectoryURL
-        let discordBinary = macOSDir.appendingPathComponent("Discord")
-        let discordReal = macOSDir.appendingPathComponent("Discord.real")
-        let dylibDestination = macOSDir.appendingPathComponent("nimo.dylib")
 
-        // Remove nimo.dylib if present.
-        if fileManager.fileExists(atPath: dylibDestination.path) {
-            do {
-                try fileManager.removeItem(at: dylibDestination)
-            } catch {
-                throw NimoError.permissionDenied(dylibDestination, underlying: error)
-            }
-        }
+        let commands: [String] = [
+            "set -e",
+            "DIR=\(shQuote(macOSDir.path))",
+            "APP=\(shQuote(installation.appURL.path))",
+            "rm -f \"$DIR/nimo.dylib\" \"$DIR/Discord\"",
+            "if [ -e \"$DIR/Discord.real\" ]; then mv \"$DIR/Discord.real\" \"$DIR/Discord\"; fi",
+            "codesign --force --deep --sign - \"$APP\" 2>/dev/null || true"
+        ]
 
-        // Remove launcher script at Discord path.
-        if fileManager.fileExists(atPath: discordBinary.path) {
-            do {
-                try fileManager.removeItem(at: discordBinary)
-            } catch {
-                throw NimoError.permissionDenied(discordBinary, underlying: error)
-            }
-        }
-
-        // Move Discord.real back to Discord.
-        if fileManager.fileExists(atPath: discordReal.path) {
-            do {
-                try fileManager.moveItem(at: discordReal, to: discordBinary)
-            } catch {
-                throw NimoError.permissionDenied(discordReal, underlying: error)
-            }
+        do {
+            try executor.run(commands.joined(separator: "\n"))
+        } catch is PrivilegedCancelled {
+            throw NimoError.authorizationCancelled
+        } catch {
+            throw NimoError.permissionDenied(macOSDir, underlying: error)
         }
 
         NimoLogger.installer.info("Uninstalled from \(installation.appURL.path, privacy: .public)")
@@ -147,31 +142,36 @@ final class InstallationManager: InstallationPerforming {
 
     // MARK: - Helpers
 
-    private func writeLauncher(to destination: URL) throws {
-        // Prefer the bundled launcher.sh resource. Fall back to an inline template if not present.
-        let data: Data
-        if let launcherURL = launcherURLProvider(),
-           let contents = try? Data(contentsOf: launcherURL) {
-            data = contents
-        } else {
-            guard let inline = Self.inlineLauncherTemplate.data(using: .utf8) else {
-                throw NimoError.bundledLauncherMissing
+    private struct LauncherSource {
+        let url: URL
+        let isTemporary: Bool
+        func cleanup() {
+            if isTemporary {
+                try? FileManager.default.removeItem(at: url)
             }
-            data = inline
         }
+    }
 
-        do {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try data.write(to: destination, options: .atomic)
-            try fileManager.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o755)],
-                ofItemAtPath: destination.path
-            )
-        } catch {
-            throw NimoError.permissionDenied(destination, underlying: error)
+    private func resolvedLauncherURL() throws -> LauncherSource {
+        if let bundled = launcherURLProvider(), fileManager.fileExists(atPath: bundled.path) {
+            return LauncherSource(url: bundled, isTemporary: false)
         }
+        let tmp = fileManager.temporaryDirectory
+            .appendingPathComponent("nimo-launcher-\(UUID().uuidString).sh")
+        guard let data = Self.inlineLauncherTemplate.data(using: .utf8) else {
+            throw NimoError.bundledLauncherMissing
+        }
+        do {
+            try data.write(to: tmp, options: .atomic)
+            try fileManager.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: tmp.path)
+        } catch {
+            throw NimoError.bundledLauncherMissing
+        }
+        return LauncherSource(url: tmp, isTemporary: true)
+    }
+
+    private func shQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static let inlineLauncherTemplate = """
