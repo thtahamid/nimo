@@ -1,4 +1,4 @@
-# Nimo
+# Nimo (in development)
 
 Nimo is a macOS installer that patches Discord.app so the client can connect from networks that block Discord's voice/RTC endpoints. It installs a small dylib (`nimo.dylib`) into Discord's app bundle via `DYLD_INSERT_LIBRARIES` and interposes `sendto`/`close` to inject a short primer packet before the first real UDP payload, which is enough to traverse certain captive portals and restrictive middleboxes.
 
